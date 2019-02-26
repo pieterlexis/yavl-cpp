@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <assert.h>
-#include "yaml.h"
+#include <algorithm>
+#include <yaml-cpp/yaml.h>
 #include "yavl.h"
 
 using namespace std;
@@ -41,12 +42,14 @@ namespace YAVL {
 
 ostream& operator << (ostream& os, const Path& path)
 {
-  for (Path::const_iterator i = path.begin(); i != path.end(); ++i) {
+  bool f = true;
+  for (auto const &i : path) {
     // no dot before list indexes and before first element
-    if ((i != path.begin()) && ((*i)[0] != '[')) {
+    if (!f && i.at(0) != '[') {
       os << '.';
     }
-    os << *i;
+    f = false;
+    os << i;
   }
   return os;
 }
@@ -62,30 +65,31 @@ ostream& operator << (ostream& os, const Exception& v)
 
 ostream& operator << (ostream& os, const Errors& v)
 {
-  for (Errors::const_iterator i = v.begin(); i != v.end(); ++i) {
-    os << *i;
+  for (const auto &i: v) {
+    os << i;
   }
   return os;
 }
 
-const string& Validator::type2str(YAML::CONTENT_TYPE t)
+const string& Validator::type2str(YAML::NodeType::value t)
 {
   static string nonestr = "none";
   static string scalarstr = "scalar";
   static string liststr = "list";
   static string mapstr = "map";
-
-  assert( (t >= YAML::CT_NONE) && (t <= YAML::CT_MAP) );
+  static string undefinedstr = "undefined";
 
   switch (t) {
-    case YAML::CT_NONE:
+    case YAML::NodeType::Null:
       return nonestr;
-    case YAML::CT_SCALAR:
+    case YAML::NodeType::Scalar:
       return scalarstr;
-    case YAML::CT_SEQUENCE:
+    case YAML::NodeType::Sequence:
       return liststr;
-    case YAML::CT_MAP:
+    case YAML::NodeType::Map:
       return mapstr;
+    case YAML::NodeType::Undefined:
+      return undefinedstr;
   }
   assert(0);
   return nonestr;
@@ -93,30 +97,25 @@ const string& Validator::type2str(YAML::CONTENT_TYPE t)
 
 int Validator::num_keys(const YAML::Node& doc)
 {
-  if (doc.GetType() != YAML::CT_MAP) {
+  if (doc.Type() != YAML::NodeType::Map) {
     return 0;
   }
-  int num = 0;
-  for (YAML::Iterator i = doc.begin(); i != doc.end(); ++i) {
-    num++;
-  }
-  return num;
+  return doc.size();
 }
 
 bool Validator::validate_map(const YAML::Node &mapNode, const YAML::Node &doc)
 {
-  if (doc.GetType() != YAML::CT_MAP) {
-    string reason = "expected map, but found " + type2str(doc.GetType());
+  if(!doc.IsMap()) {
+    string reason = "expected map, but found " + type2str(doc.Type());
     gen_error(Exception(reason, gr_path, doc_path));
     return false;
   }
 
   bool ok = true;
-  for (YAML::Iterator i = mapNode.begin(); i != mapNode.end(); ++i) {
-    string key = i.first();
-    const YAML::Node &valueNode = i.second();
-    const YAML::Node *docMapNode = 0;
-    if (!(docMapNode = doc.FindValue(key))) {
+  for (const auto &i : mapNode) {
+    string key = i.first.as<string>();
+    const YAML::Node &valueNode = i.second;
+    if (!doc[key]) {
       string reason = "key: " + key + " not found.";
       gen_error(Exception(reason, gr_path, doc_path));
       ok = false;
@@ -124,7 +123,7 @@ bool Validator::validate_map(const YAML::Node &mapNode, const YAML::Node &doc)
       doc_path.push_back(key);
       gr_path.push_back(key);
 
-      ok = validate_doc(valueNode, *docMapNode) && ok;
+      ok = validate_doc(valueNode, doc[key]) && ok;
 
       gr_path.pop_back();
       doc_path.pop_back();
@@ -135,13 +134,12 @@ bool Validator::validate_map(const YAML::Node &mapNode, const YAML::Node &doc)
 
 bool Validator::validate_leaf(const YAML::Node &gr, const YAML::Node &doc)
 {
-  assert( gr.GetType() == YAML::CT_SEQUENCE );
-
+  assert( gr.IsSequence() );
   const YAML::Node& typespec_map = gr[0];
-  assert( num_keys(typespec_map) == 1);
+  assert( typespec_map.size() == 1);
 
-  string type = typespec_map.begin().first();
-  const YAML::Node& type_specifics = typespec_map.begin().second();
+  string type = typespec_map.begin()->first.as<string>();
+  const auto type_specifics = typespec_map.begin()->second;
 
   bool ok = true;
   if (type == "string") {
@@ -154,17 +152,13 @@ bool Validator::validate_leaf(const YAML::Node &gr, const YAML::Node &doc)
     attempt_to_convert<int>(doc, ok);
   } else if (type == "uint") {
     attempt_to_convert<unsigned int>(doc, ok);
+  } else if (type == "bool") {
+    attempt_to_convert<bool>(doc, ok);
   } else if (type == "enum") {
-    ok = false;
-    string docValue = doc;
-    for (YAML::Iterator i = type_specifics.begin(); i != type_specifics.end(); ++i) {
-      if (*i == docValue) {
-        ok = true;
-        break;
-      }
-    }
+    auto docValue = doc;
+    ok = std::any_of(type_specifics.begin(), type_specifics.end(), [docValue](const YAML::detail::iterator_value i) { return i == docValue; });
     if (!ok) {
-      string reason = "enum string '" + docValue + "' is not allowed.";
+      string reason = "enum string '" + docValue.as<string>() + "' is not allowed.";
       gen_error(Exception(reason, gr_path, doc_path));
     }
   }
@@ -173,8 +167,8 @@ bool Validator::validate_leaf(const YAML::Node &gr, const YAML::Node &doc)
 
 bool Validator::validate_list(const YAML::Node &gr, const YAML::Node &doc)
 {
-  if (doc.GetType() != YAML::CT_SEQUENCE) {
-    string reason = "expected list, but found " + type2str(doc.GetType());
+  if (!doc.IsSequence()) {
+    string reason = "expected list, but found " + type2str(doc.Type());
     gen_error(Exception(reason, gr_path, doc_path));
     return false;
   }
@@ -183,11 +177,12 @@ bool Validator::validate_list(const YAML::Node &gr, const YAML::Node &doc)
   int n = 0;
   char buf[128];
 
-  for (YAML::Iterator i = doc.begin(); i != doc.end(); ++i, ++n) {
+  for (const auto &i : doc) {
     snprintf(buf, sizeof(buf), "[%d]", n);
     doc_path.push_back(buf);
-    ok = validate_doc(gr, *i) && ok;
+    ok = validate_doc(gr, i) && ok;
     doc_path.pop_back();
+    n++;
   }
   return ok;
 }
@@ -195,18 +190,18 @@ bool Validator::validate_list(const YAML::Node &gr, const YAML::Node &doc)
 bool Validator::validate_doc(const YAML::Node &gr, const YAML::Node &doc)
 {
   bool ok = true;
-  const YAML::Node *mapNode = 0;
-  const YAML::Node *listNode = 0;
-  if ((mapNode = gr.FindValue("map"))) {
+
+  if (gr["map"]) {
     gr_path.push_back("map");
-    ok = validate_map(*mapNode, doc) && ok;
+    ok = validate_map(gr["map"], doc) && ok;
     gr_path.pop_back();
-  } else if ((listNode = gr.FindValue("list"))) {
+  } else if (gr["list"]) {
     gr_path.push_back("list");
-    ok = validate_list(*listNode, doc) && ok;
+    ok = validate_list(gr["list"], doc) && ok;
     gr_path.pop_back();
   } else {
     ok = validate_leaf(gr, doc) && ok;
   }
+
   return ok;
 }
