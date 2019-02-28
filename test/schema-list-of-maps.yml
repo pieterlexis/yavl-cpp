@@ -1,10 +1,10 @@
 ---
 - type: list
   list:
-    - type: map
-      map:
-        - key: k1
-          type: string
-        - key: k2
-          type: string
+    type: map
+    map:
+      - key: k1
+        type: string
+      - key: k2
+        type: string
 

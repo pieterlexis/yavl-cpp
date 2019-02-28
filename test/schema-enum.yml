@@ -1,0 +1,9 @@
+---
+- type: enum
+  enum:
+    type: string
+    choices:
+      - a
+      - b
+      - c
+

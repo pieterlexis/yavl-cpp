@@ -1,4 +1,4 @@
 ---
 - type: list
   list:
-    - type: string
+    type: string

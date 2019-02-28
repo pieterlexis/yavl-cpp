@@ -72,6 +72,9 @@ ostream& operator << (ostream& os, const Errors& v)
   return os;
 }
 
+const string Validator::schema_err = "Schema malformed: ";
+const string Validator::document_err = "Error in document: ";
+
 const string& Validator::type2str(YAML::NodeType::value t)
 {
   static string nonestr = "none";
@@ -109,7 +112,7 @@ bool Validator::get_type(const YAML::Node &grNode, std::string& t) {
     t = grNode["type"].as<string>();
     return true;
   } catch (const YAML::Exception &e) {
-    gen_error(Exception("Could not get 'type' from schema: " + e.msg, gr_path, doc_path));
+    gen_error(Exception(schema_err + "problem with 'type': " + e.msg, gr_path, doc_path));
     return false;
   }
 }
@@ -119,7 +122,18 @@ bool Validator::get_key(const YAML::Node &grNode, std::string& key) {
     key = grNode["key"].as<string>();
     return true;
   } catch (const YAML::Exception &e) {
-    gen_error(Exception("Could not get required key from schema: " + e.msg, gr_path, doc_path));
+    gen_error(Exception(schema_err + "problem with 'key': " + e.msg, gr_path, doc_path));
+    return false;
+  }
+}
+
+template<typename T>
+bool Validator::get_enum(const YAML::Node &grNode, std::vector<T>& enums) {
+  try {
+    enums = grNode["enum"]["choices"].as<vector<T>>();
+    return true;
+  } catch (const YAML::Exception &e) {
+    gen_error(Exception(schema_err + "problem with 'enum': " + e.msg, gr_path, doc_path));
     return false;
   }
 }
@@ -171,75 +185,40 @@ bool Validator::validate_map(const YAML::Node &mapNode, const YAML::Node &doc)
 
 bool Validator::validate_element(const YAML::Node &gr, const YAML::Node &doc)
 {
-  assert(gr.IsMap());
-  assert(doc.IsScalar());
+  // Is the schema valid?
+  if (!gr.IsMap()) {
+    gen_error(Exception(schema_err + "element description is not a map", gr_path, doc_path));
+    return false;
+  }
+
+  if (!doc.IsScalar()) {
+    gen_error(Exception(document_err + "element not found", gr_path, doc_path));
+    return false;
+  }
 
   string t;
   if (!get_type(gr, t)) {
     return false;
   }
 
-  if (t == "string") {
-    try {
-      auto val = doc.as<string>();
-      return true;
-    } catch (const YAML::Exception &e) {
-      gen_error(Exception("Value in document is not a string: " + e.msg, gr_path, doc_path));
-    }
+  if (t == "enum") {
+    return check_enum(gr, doc);
   }
 
-  return false;
-}
-
-bool Validator::validate_leaf(const YAML::Node &gr, const YAML::Node &doc)
-{
-  assert( gr.IsSequence() );
-  const YAML::Node& typespec_map = gr[0];
-  assert( typespec_map.size() == 1);
-
-  string type = gr[0]["type"].as<string>();
-  bool optional_var = gr[0]["optional"].as<bool>(false);
-
-  bool ok = true;
-  if (type == "string") {
-    attempt_to_convert<string>(doc, ok);
-  } else if (type == "uint64") {
-    attempt_to_convert<unsigned long long>(doc, ok);
-  } else if (type == "int64") {
-    attempt_to_convert<long long>(doc, ok);
-  } else if (type == "int") {
-    attempt_to_convert<int>(doc, ok);
-  } else if (type == "uint") {
-    attempt_to_convert<unsigned int>(doc, ok);
-  } else if (type == "bool") {
-    attempt_to_convert<bool>(doc, ok);
-  } else if (type == "enum") {
-    /* XXX
-    auto docValue = doc;
-    ok = std::any_of(type_specifics.begin(), type_specifics.end(), [docValue](const YAML::detail::iterator_value i) { return i == docValue; });
-    if (!ok) {
-      string reason = "enum string '" + docValue.as<string>() + "' is not allowed.";
-      gen_error(Exception(reason, gr_path, doc_path));
-    }
-    */
-  }
-  return ok;
+  return scalar_is_of_type(doc, t);
 }
 
 bool Validator::validate_list(const YAML::Node &gr, const YAML::Node &doc)
 {
-  if (!gr.IsSequence()) {
-    gen_error(Exception("Schema error: \"list\" description is not a sequence", gr_path, doc_path));
-    return false;
-  }
-  if(gr.size() != 1) {
-    gen_error(Exception("Schema error: \"list\" description sequence's size is not 1 but " + gr.size(), gr_path, doc_path));
+  // Is the schema valid?
+  if (!gr.IsMap()) {
+    gen_error(Exception(schema_err + "\"list\" description is not a map", gr_path, doc_path));
     return false;
   }
 
+  // Is the subdocument valid?
   if (!doc.IsSequence()) {
-    string reason = "expected list, but found " + type2str(doc.Type());
-    gen_error(Exception(reason, gr_path, doc_path));
+    gen_error(Exception(document_err + "expected list, but found " + type2str(doc.Type()), gr_path, doc_path));
     return false;
   }
 
@@ -248,14 +227,24 @@ bool Validator::validate_list(const YAML::Node &gr, const YAML::Node &doc)
   char buf[128];
 
   string t;
-  if (!get_type(gr[0], t)) {
+  if (!get_type(gr, t)) {
     return false;
   }
 
   for (const auto &i : doc) {
     snprintf(buf, sizeof(buf), "[%d]", n);
     doc_path.push_back(buf);
-    ok = validate_element(gr[0], i) && ok;
+    if (t == "map") {
+      gr_path.push_back("map");
+      ok = validate_map(gr["map"], i) && ok;
+      gr_path.pop_back();
+    } else if (t == "list") {
+      gr_path.push_back("list");
+      ok = validate_list(gr["list"], i) && ok;
+      gr_path.pop_back();
+    } else {
+      ok = validate_element(gr, i) && ok;
+    }
     doc_path.pop_back();
     n++;
   }
@@ -264,39 +253,38 @@ bool Validator::validate_list(const YAML::Node &gr, const YAML::Node &doc)
 
 bool Validator::validate_doc(const YAML::Node &gr, const YAML::Node &doc)
 {
-  if (gr.Type() != YAML::NodeType::Sequence) {
-    gen_error(Exception("Document is no sequence", gr_path, doc_path));
+  if (!gr.IsSequence()) {
+    gen_error(Exception(schema_err + "it is not a sequence", gr_path, doc_path));
     return false;
   }
 
   bool ok = true;
+  int n = 0;
+  char buf[128];
+
   for (const auto &i: gr) {
-    if (!i["type"]) {
-      gen_error(Exception("No type field", gr_path, doc_path));
+    snprintf(buf, sizeof(buf), "[%d]", n);
+    gr_path.push_back(buf);
+
+    string t;
+    if (!get_type(i, t)) {
       ok = false;
       continue;
     }
 
-    string node_type;
-    try {
-      node_type = i["type"].as<string>();
-    } catch (const YAML::Exception &e) {
-      gen_error(Exception("type field is not a string:" + e.msg, gr_path, doc_path));
-      ok = false;
-      continue;
-    }
-
-    if (node_type == "map") {
+    if (t == "map") {
       gr_path.push_back("map");
       ok = validate_map(i["map"], doc) && ok;
       gr_path.pop_back();
-    } else if (node_type == "list") {
+    } else if (t == "list") {
       gr_path.push_back("list");
       ok = validate_list(i["list"], doc) && ok;
       gr_path.pop_back();
     } else {
-      ok = validate_leaf(i, doc) && ok;
+      ok = validate_element(i, doc) && ok;
     }
+
+    gr_path.pop_back();
   }
 
   return ok;

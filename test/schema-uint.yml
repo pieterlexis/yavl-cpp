@@ -1,0 +1,11 @@
+---
+- type: map
+  map:
+    - key: uint64
+      type: uint64
+    - key: int64
+      type: int64
+    - key: uint32
+      type: uint32
+    - key: int32
+      type: int32
