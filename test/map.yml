@@ -1,0 +1,9 @@
+---
+foo: "hello"
+
+bar:
+  quuz: "nested"
+
+floob:
+  - one
+  - two

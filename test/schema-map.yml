@@ -1,0 +1,14 @@
+---
+- type: map
+  map:
+    - key: foo
+      type: string
+    - key: bar
+      type: map
+      map:
+        - key: quuz
+          type: string
+    - key: floob
+      type: list
+      list:
+        - type: string

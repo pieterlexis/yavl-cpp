@@ -45,9 +45,16 @@ namespace YAVL
     bool validate_list(const YAML::Node &gr, const YAML::Node &doc);
     bool validate_doc(const YAML::Node &gr, const YAML::Node &doc);
 
+    bool validate_element(const YAML::Node &gr, const YAML::Node &doc);
+
     void gen_error(const Exception& err) {
       errors.push_back(err);
     }
+
+    // Returns true if the key was found and "key" is filled with the value
+    // Returns false otherwise (and has added an error)
+    bool get_key(const YAML::Node &grNode, std::string& key);
+    bool get_type(const YAML::Node &grNode, std::string& t);
 
     template<typename T>
     void attempt_to_convert(const YAML::Node& scalar_node, bool& ok) {
@@ -59,6 +66,11 @@ namespace YAVL
         gen_error(Exception(reason, gr_path, doc_path));
         ok = false;
       }
+    }
+
+    template<typename T>
+    T value_from_scalar(const YAML::Node &scalar_node) {
+      return scalar_node.as<T>();
     }
 
   public:
